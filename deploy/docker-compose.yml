@@ -1,0 +1,153 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ../ai_backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend.env
+    environment:
+      # при использовании Postgres в проде убедитесь, что DATABASE_URL указывает на postgres-сервис
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks: 
+      - app
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    env_file:
+      - ./frontend.env
+    restart: unless-stopped
+    networks: 
+      - app
+    expose:
+      - "3000"
+
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - app
+    ports:
+      - "5432:5432"   # чтобы подключаться локально (psql/Adminer/локальный backend)
+
+  adminer:
+    image: adminer:4
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    networks:
+      - app
+    ports:
+      - "8080:8080"   # http://<vds-ip>:8080
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    networks:
+      - app
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Веб-интерфейс Mailpit: http://<vds-ip>:8025
+
+  nginx:
+    image: nginx:1.25-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/site-http.conf:/etc/nginx/conf.d/10-site-http.conf:ro
+      - ./nginx/site-https.conf:/etc/nginx/conf.d/20-site-https.conf:ro
+      - certbot-etc:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    depends_on:
+      - nginx
+    networks:
+      - app
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: /bin/sh -c
+    command: >
+      "trap exit TERM;
+       while :; do
+         certbot renew --non-interactive --agree-tos --webroot -w /var/www/certbot;
+         sleep 12h;
+       done"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    networks:
+      - monitoring
+    ports:
+      - "8088:8080"   # http://<vds-ip>:8088/metrics
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    restart: unless-stopped
+    networks:
+      - monitoring
+    depends_on:
+      - cadvisor
+    ports:
+      - "9090:9090"   # http://<vds-ip>:9090
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+    ports:
+      - "3001:3000"   # http://<vds-ip>:3001
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+
+networks:
+  app:
+  monitoring:
+
+volumes:
+  pgdata:
+  certbot-etc:
+  certbot-www:
+  prometheus-data:
+  grafana-data:
